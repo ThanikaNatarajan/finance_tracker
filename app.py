@@ -5,41 +5,100 @@ from datetime import datetime
 
 # Initialize connection to the database
 conn = sqlite3.connect('finance_tracker.db', check_same_thread=False)
+
+# Migration: Add 'type' column if it doesn't exist and create income table
+def migrate_database():
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(transactions)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'type' not in columns:
+        cursor.execute("ALTER TABLE transactions ADD COLUMN type TEXT")
+    
+    cursor.execute('''CREATE TABLE IF NOT EXISTS income
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       amount REAL,
+                       date TEXT)''')
+    
+    # Create goals table
+    cursor.execute('''CREATE TABLE IF NOT EXISTS goals
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       name TEXT,
+                       target_amount REAL,
+                       current_amount REAL,
+                       deadline TEXT)''')
+    conn.commit()
+
+migrate_database()
+
 conn.execute('''CREATE TABLE IF NOT EXISTS transactions
                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 date TEXT, category TEXT, amount REAL, description TEXT)''')
+                 date TEXT, category TEXT, amount REAL, description TEXT, type TEXT)''')
 conn.execute('''CREATE TABLE IF NOT EXISTS categories
                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
                  name TEXT UNIQUE)''')
 conn.commit()
 
-def add_transaction(date, category, amount, description):
-    conn.execute("INSERT INTO transactions (date, category, amount, description) VALUES (?, ?, ?, ?)",
-                 (date, category, amount, description))
+# Goal-related functions
+def add_goal(name, target_amount, deadline):
+    conn.execute("INSERT INTO goals (name, target_amount, current_amount, deadline) VALUES (?, ?, ?, ?)",
+                 (name, target_amount, 0, deadline.strftime('%Y-%m-%d')))
+    conn.commit()
+
+def get_goals():
+    df = pd.read_sql_query("SELECT * FROM goals", conn)
+    df['deadline'] = pd.to_datetime(df['deadline'])
+    return df
+
+def update_goal(goal_id, name, target_amount, current_amount, deadline):
+    conn.execute("UPDATE goals SET name = ?, target_amount = ?, current_amount = ?, deadline = ? WHERE id = ?",
+                 (name, target_amount, current_amount, deadline.strftime('%Y-%m-%d'), goal_id))
+    conn.commit()
+
+def delete_goal(goal_id):
+    conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+    conn.commit()
+
+# Existing functions...
+def add_transaction(date, category, amount, description, transaction_type):
+    conn.execute("INSERT INTO transactions (date, category, amount, description, type) VALUES (?, ?, ?, ?, ?)",
+                 (date, category, amount, description, transaction_type))
     conn.commit()
 
 def get_all_transactions():
     df = pd.read_sql_query("SELECT * FROM transactions", conn)
     df['date'] = pd.to_datetime(df['date'])
+    if 'type' not in df.columns:
+        df['type'] = 'Debit'  # Default to 'Debit' for old records
     return df
 
 def delete_transaction(transaction_id):
     conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
     conn.commit()
 
-def update_transaction(transaction_id, date, category, amount, description):
-    conn.execute("UPDATE transactions SET date = ?, category = ?, amount = ?, description = ? WHERE id = ?",
-                 (date.strftime('%Y-%m-%d'), category, amount, description, transaction_id))
+def update_transaction(transaction_id, date, category, amount, description, transaction_type):
+    conn.execute("UPDATE transactions SET date = ?, category = ?, amount = ?, description = ?, type = ? WHERE id = ?",
+                 (date.strftime('%Y-%m-%d'), category, amount, description, transaction_type, transaction_id))
+    conn.commit()
+
+def get_income():
+    cursor = conn.cursor()
+    cursor.execute("SELECT amount, date FROM income ORDER BY date DESC LIMIT 1")
+    result = cursor.fetchone()
+    return result if result else (0, None)
+
+def set_income(amount, date):
+    conn.execute("INSERT INTO income (amount, date) VALUES (?, ?)", (amount, date))
     conn.commit()
 
 def get_statistics():
     transactions = get_all_transactions()
+    income, income_date = get_income()
     if not transactions.empty:
-        total_income = transactions[transactions['category'] == 'Income']['amount'].sum()
-        total_expenses = transactions[transactions['category'] != 'Income']['amount'].sum()
-        balance = total_income - total_expenses
-        return total_income, total_expenses, balance
-    return 0, 0, 0
+        expenses = transactions[transactions['type'] == 'Debit']['amount'].sum()
+        credit = transactions[transactions['type'] == 'Credit']['amount'].sum()
+        balance = income + credit - expenses  # Corrected balance calculation
+        return income, expenses, credit, balance, income_date
+    return income, 0, 0, income, income_date
 
 def get_categories():
     return pd.read_sql_query("SELECT * FROM categories", conn)
@@ -74,21 +133,40 @@ if st.sidebar.button("Transactions"):
     change_page("Transactions")
 if st.sidebar.button("Categories"):
     change_page("Categories")
+if st.sidebar.button("Goals"):
+    change_page("Goals")
 
 if st.session_state.page == "Dashboard":
     st.title('Finance Dashboard')
 
     # Get statistics
-    total_income, total_expenses, balance = get_statistics()
+    income, expenses, credit, balance, income_date = get_statistics()
 
     # Display statistics in box-like components
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric(label="Total Income", value=f"${total_income:.2f}", delta="Income")
+        st.metric(label="Income", value=f"${income:.2f}")
+        if income_date:
+            st.caption(f"Last updated: {income_date}")
     with col2:
-        st.metric(label="Total Expenses", value=f"${total_expenses:.2f}", delta="Expenses")
+        st.metric(label="Total Expenses", value=f"${expenses:.2f}")
     with col3:
-        st.metric(label="Current Balance", value=f"${balance:.2f}", delta="Balance")
+        st.metric(label="Total Credit", value=f"${credit:.2f}")
+    with col4:
+        st.metric(label="Current Balance", value=f"${balance:.2f}")
+
+    # Income editing
+    if st.button('Edit Income'):
+        st.session_state.editing_income = True
+
+    if 'editing_income' in st.session_state and st.session_state.editing_income:
+        new_income = st.number_input('New Income Amount', min_value=0.0, value=float(income), format='%0.2f')
+        new_income_date = st.date_input('Income Date', datetime.now().date())
+        if st.button('Save Income'):
+            set_income(new_income, new_income_date.strftime('%Y-%m-%d'))
+            st.session_state.editing_income = False
+            st.success('Income updated successfully!')
+            st.rerun()
 
     # Add Transaction button
     if st.button('Add New Transaction'):
@@ -99,9 +177,20 @@ if st.session_state.page == "Dashboard":
     st.subheader("Recent Transactions")
     transactions = get_all_transactions().tail(5)  # Get last 5 transactions
     if not transactions.empty:
-        st.dataframe(transactions[['date', 'category', 'amount', 'description']], use_container_width=True)
+        st.dataframe(transactions[['date', 'category', 'amount', 'description', 'type']], use_container_width=True)
     else:
         st.write("No transactions found.")
+
+    # Display goals progress
+    st.subheader("Financial Goals Progress")
+    goals = get_goals()
+    if not goals.empty:
+        for _, goal in goals.iterrows():
+            progress = min(goal['current_amount'] / goal['target_amount'], 1.0)
+            st.write(f"{goal['name']}: ${goal['current_amount']:.2f} / ${goal['target_amount']:.2f}")
+            st.progress(progress)
+    else:
+        st.write("No goals set. Add goals in the Goals section.")
 
 elif st.session_state.page == "Transactions":
     st.title('Transactions')
@@ -113,9 +202,10 @@ elif st.session_state.page == "Transactions":
     category = st.selectbox('Category', categories)
     amount = st.number_input('Amount', min_value=0.01, format='%0.2f')
     description = st.text_input('Description')
+    transaction_type = st.selectbox('Transaction Type', ['Debit', 'Credit'])
 
     if st.button('Add Transaction'):
-        add_transaction(date.strftime('%Y-%m-%d'), category, amount, description)
+        add_transaction(date.strftime('%Y-%m-%d'), category, amount, description, transaction_type)
         st.success('Transaction added successfully!')
         st.rerun()
 
@@ -135,6 +225,7 @@ elif st.session_state.page == "Transactions":
                 "category": st.column_config.SelectboxColumn("Category", options=categories),
                 "amount": st.column_config.NumberColumn("Amount", format="$%.2f", min_value=0.01, step=0.01),
                 "description": st.column_config.TextColumn("Description"),
+                "type": st.column_config.SelectboxColumn("Type", options=['Debit', 'Credit']),
                 "Delete": st.column_config.CheckboxColumn("Delete")
             },
             hide_index=True,
@@ -149,8 +240,9 @@ elif st.session_state.page == "Transactions":
                 elif (row['date'] != transactions.loc[index, 'date'] or 
                       row['category'] != transactions.loc[index, 'category'] or 
                       row['amount'] != transactions.loc[index, 'amount'] or 
-                      row['description'] != transactions.loc[index, 'description']):
-                    update_transaction(row['id'], row['date'], row['category'], row['amount'], row['description'])
+                      row['description'] != transactions.loc[index, 'description'] or
+                      row['type'] != transactions.loc[index, 'type']):
+                    update_transaction(row['id'], row['date'], row['category'], row['amount'], row['description'], row['type'])
             st.success('Transactions updated successfully!')
             st.rerun()
     else:
@@ -199,3 +291,55 @@ elif st.session_state.page == "Categories":
             st.rerun()
     else:
         st.write('No categories found.')
+
+elif st.session_state.page == "Goals":
+    st.title('Financial Goals')
+
+    # Add goal form
+    st.subheader('Add New Goal')
+    goal_name = st.text_input('Goal Name')
+    target_amount = st.number_input('Target Amount', min_value=0.01, format='%0.2f')
+    deadline = st.date_input('Deadline')
+
+    if st.button('Add Goal'):
+        add_goal(goal_name, target_amount, deadline)
+        st.success('Goal added successfully!')
+        st.rerun()
+
+    # Display and edit goals
+    st.subheader('All Goals')
+    goals = get_goals()
+    if not goals.empty:
+        edited_df = st.data_editor(
+            goals,
+            column_config={
+                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "name": st.column_config.TextColumn("Goal Name"),
+                "target_amount": st.column_config.NumberColumn("Target Amount", format="$%.2f", min_value=0.01, step=0.01),
+                "current_amount": st.column_config.NumberColumn("Current Amount", format="$%.2f", min_value=0.0, step=0.01),
+                "deadline": st.column_config.DateColumn("Deadline"),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+        
+        # Check for updates
+        if not edited_df.equals(goals):
+            for index, row in edited_df.iterrows():
+                if (row['name'] != goals.loc[index, 'name'] or 
+                    row['target_amount'] != goals.loc[index, 'target_amount'] or 
+                    row['current_amount'] != goals.loc[index, 'current_amount'] or 
+                    row['deadline'] != goals.loc[index, 'deadline']):
+                    update_goal(row['id'], row['name'], row['target_amount'], row['current_amount'], row['deadline'])
+            st.success('Goals updated successfully!')
+            st.rerun()
+
+        # Delete goals
+        goal_to_delete = st.selectbox('Select goal to delete', goals['name'].tolist())
+        if st.button('Delete Goal'):
+            goal_id = goals[goals['name'] == goal_to_delete]['id'].values[0]
+            delete_goal(goal_id)
+            st.success(f"Deleted goal: {goal_to_delete}")
+            st.rerun()
+    else:
+        st.write('No goals found.')
