@@ -426,6 +426,7 @@ elif st.session_state.page == "Scheduled Transactions":
     st.subheader('All Scheduled Transactions')
     scheduled_transactions = get_scheduled_transactions()
     if not scheduled_transactions.empty:
+        scheduled_transactions['date'] = pd.to_datetime(scheduled_transactions['date'])  # Convert to datetime
         scheduled_transactions['Delete'] = False
         edited_df = st.data_editor(
             scheduled_transactions,
