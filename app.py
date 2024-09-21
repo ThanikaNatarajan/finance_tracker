@@ -8,6 +8,14 @@ import plotly.graph_objects as go
 # Initialize connection to the database
 conn = sqlite3.connect('finance_tracker.db', check_same_thread=False)
 
+# Create necessary tables before attempting to migrate
+conn.execute('''CREATE TABLE IF NOT EXISTS transactions
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 date TEXT, category TEXT, amount REAL, description TEXT, type TEXT)''')
+conn.execute('''CREATE TABLE IF NOT EXISTS categories
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT UNIQUE)''')
+conn.commit()
 # Database migration and initialization
 def migrate_database():
     cursor = conn.cursor()
@@ -317,33 +325,30 @@ elif st.session_state.page == "Categories":
     st.subheader('All Categories')
     categories = get_categories()
     if not categories.empty:
+        categories['Delete'] = False  # Add Delete column
         edited_df = st.data_editor(
             categories,
             column_config={
-                "id": st.column_config.NumberColumn("ID"),
+                "id": st.column_config.NumberColumn("ID", disabled=True),
                 "name": st.column_config.TextColumn("Category Name"),
+                "Delete": st.column_config.CheckboxColumn("Delete"),
             },
-            disabled=["id"],
             hide_index=True,
             use_container_width=True
         )
 
+        # Handle updates and deletions
         if not edited_df.equals(categories):
             for index, row in edited_df.iterrows():
-                if row['name'] != categories.loc[index, 'name']:
+                if row['Delete']:
+                    delete_category(row['id'])
+                elif row['name'] != categories.loc[index, 'name']:
                     update_category(row['id'], row['name'])
             st.success('Categories updated successfully!')
             st.rerun()
-
-        # Delete categories
-        category_to_delete = st.selectbox('Select category to delete', categories['name'].tolist())
-        if st.button('Delete Category'):
-            category_id = categories[categories['name'] == category_to_delete]['id'].values[0]
-            delete_category(category_id)
-            st.success(f"Deleted category: {category_to_delete}")
-            st.rerun()
     else:
         st.write('No categories found.')
+
 
 elif st.session_state.page == "Goals":
     st.title('Financial Goals')
@@ -363,6 +368,7 @@ elif st.session_state.page == "Goals":
     st.subheader('All Goals')
     goals = get_goals()
     if not goals.empty:
+        goals['Delete'] = False  # Add Delete column
         edited_df = st.data_editor(
             goals,
             column_config={
@@ -371,28 +377,23 @@ elif st.session_state.page == "Goals":
                 "target_amount": st.column_config.NumberColumn("Target Amount", format="$%.2f", min_value=0.01, step=0.01),
                 "current_amount": st.column_config.NumberColumn("Current Amount", format="$%.2f", min_value=0.0, step=0.01),
                 "deadline": st.column_config.DateColumn("Deadline"),
+                "Delete": st.column_config.CheckboxColumn("Delete"),
             },
             hide_index=True,
             use_container_width=True
         )
 
-        # Check for updates
+        # Check for updates and deletions
         if not edited_df.equals(goals):
             for index, row in edited_df.iterrows():
-                if (row['name'] != goals.loc[index, 'name'] or
-                    row['target_amount'] != goals.loc[index, 'target_amount'] or
-                    row['current_amount'] != goals.loc[index, 'current_amount'] or
-                    row['deadline'] != goals.loc[index, 'deadline']):
+                if row['Delete']:
+                    delete_goal(row['id'])
+                elif (row['name'] != goals.loc[index, 'name'] or
+                      row['target_amount'] != goals.loc[index, 'target_amount'] or
+                      row['current_amount'] != goals.loc[index, 'current_amount'] or
+                      row['deadline'] != goals.loc[index, 'deadline']):
                     update_goal(row['id'], row['name'], row['target_amount'], row['current_amount'], row['deadline'])
             st.success('Goals updated successfully!')
-            st.rerun()
-
-        # Delete goals
-        goal_to_delete = st.selectbox('Select goal to delete', goals['name'].tolist())
-        if st.button('Delete Goal'):
-            goal_id = goals[goals['name'] == goal_to_delete]['id'].values[0]
-            delete_goal(goal_id)
-            st.success(f"Deleted goal: {goal_to_delete}")
             st.rerun()
     else:
         st.write('No goals found.')
@@ -402,6 +403,7 @@ elif st.session_state.page == "Goals":
         _, _, balance = get_statistics()  # This will update the goals
         st.success(f'Goals updated with current balance: ${balance:.2f}')
         st.rerun()
+
 
 # Scheduled Transactions page
 elif st.session_state.page == "Scheduled Transactions":
