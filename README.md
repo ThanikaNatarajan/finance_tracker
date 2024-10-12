@@ -1,4 +1,4 @@
-# Finance tracker v2
+# Finance tracker
 ## Objective / Problem Statement
 Develop a python based personal finance tracker to help users monitor income , expenses and savings. 
 The application will allow users to input financial transactions, categorize them , generate reports , set budgets and visualize spending patterns . 
